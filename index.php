@@ -9,6 +9,7 @@ $host = $_ENV['DB_HOST'];
 $user = $_ENV['DB_USER'];
 $pass = $_ENV['DB_PASS'];
 $db = $_ENV['DB_NAME'];
+$api_key = $_ENV['API_KEY'];
 
 $conn = new mysqli($host, $user, $pass, $db);
 
@@ -22,7 +23,6 @@ header("Content-Type: application/json");
 $method = $_SERVER['REQUEST_METHOD'];
 $id = $_GET['id'] ?? null;
 
-
 switch ($method) {
     case 'GET':
         if ($id === null) {
@@ -32,26 +32,41 @@ switch ($method) {
         }
         break;
     case 'POST':
-        insert_skater($conn);
+        if (authorize()) {
+            insert_skater($conn);
+        }
         break;
     case 'PUT':
-        if ($id !== null) {
+        if ($id !== null && authorize()) {
             update_skater($conn, $id);
         } else {
             respond(400, "ID is required for updating a skater.");
         }
         break;
     case 'DELETE':
-        if ($id !== null) {
+        if ($id !== null && authorize()) {
             delete_skater($conn, $id);
         } else {
             respond(400, "ID is required for deleting a skater.");
         }
         break;
     default:
-
         respond(405, "Method not allowed.");
         break;
+}
+
+function authorize()
+{
+    global $api_key;
+    $headers = getallheaders();
+    $client_key = $headers['Authorization'] ?? null;
+
+    if ($client_key && $client_key === "Bearer $api_key") {
+        return true;
+    } else {
+        respond(401, "Unauthorized: Invalid or missing API key.");
+        return false;
+    }
 }
 
 function get_all_skaters($conn)
@@ -61,7 +76,7 @@ function get_all_skaters($conn)
 
     if ($result) {
         $skaters = $result->fetch_all(MYSQLI_ASSOC);
-        respond(200, "skaters retrieved successfully.", $skaters);
+        respond(200, "Skaters retrieved successfully.", $skaters);
     } else {
         respond(500, "Error retrieving skaters.");
     }
@@ -77,9 +92,9 @@ function get_skater($conn, $id)
 
     if ($result && $result->num_rows > 0) {
         $skater = $result->fetch_assoc();
-        respond(200, "skater retrieved successfully.", $skater);
+        respond(200, "Skater retrieved successfully.", $skater);
     } else {
-        respond(404, "skater not found.");
+        respond(404, "Skater not found.");
     }
 }
 
@@ -101,7 +116,7 @@ function insert_skater($conn)
 
     if ($stmt->execute()) {
         $data['id'] = $conn->insert_id;
-        respond(201, "skater created successfully.", $data);
+        respond(201, "Skater created successfully.", $data);
     } else {
         respond(500, "Error creating skater.");
     }
@@ -124,7 +139,7 @@ function update_skater($conn, $id)
     $stmt->bind_param("sisi", $name, $points, $instagram, $id);
 
     if ($stmt->execute()) {
-        respond(200, "skater updated successfully.");
+        respond(200, "Skater updated successfully.");
     } else {
         respond(500, "Error updating skater.");
     }
@@ -137,7 +152,7 @@ function delete_skater($conn, $id)
     $stmt->bind_param("i", $id);
 
     if ($stmt->execute()) {
-        respond(200, "skater deleted successfully.");
+        respond(200, "Skater deleted successfully.");
     } else {
         respond(500, "Error deleting skater.");
     }
