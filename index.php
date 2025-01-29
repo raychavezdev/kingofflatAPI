@@ -2,6 +2,9 @@
 
 require_once __DIR__ . '/vendor/autoload.php';
 
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
+
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
 $dotenv->load();
 
@@ -9,7 +12,7 @@ $host = $_ENV['DB_HOST'];
 $user = $_ENV['DB_USER'];
 $pass = $_ENV['DB_PASS'];
 $db = $_ENV['DB_NAME'];
-$api_key = $_ENV['API_KEY'];
+$jwt_secret = $_ENV['JWT_SECRET'];
 
 $conn = new mysqli($host, $user, $pass, $db);
 
@@ -20,54 +23,163 @@ if ($conn->connect_error) {
 
 header("Content-Type: application/json");
 
-$method = $_SERVER['REQUEST_METHOD'];
-$id = $_GET['id'] ?? null;
 
-switch ($method) {
-    case 'GET':
-        if ($id === null) {
-            get_all_skaters($conn);
+
+$method = $_SERVER['REQUEST_METHOD'];
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+// Añadir estos encabezados CORS antes de cualquier respuesta
+function add_cors_headers()
+{
+    // Configura el encabezado CORS en todas las respuestas
+    header("Access-Control-Allow-Origin: *");
+    header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS");
+    header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
+}
+
+// Manejo de la solicitud OPTIONS (preflight)
+if ($method === 'OPTIONS') {
+    add_cors_headers();
+    respond(200, 'CORS preflight successful');
+    exit;
+}
+
+// Añadir encabezados CORS antes de todas las respuestas en el switch
+add_cors_headers();
+
+switch (true) {
+    case preg_match('/^\/.*\/login$/', $path):
+        if ($method === 'POST') {
+            login($conn);
         } else {
-            get_skater($conn, $id);
+            respond(405, "Method not allowed.");
         }
         break;
-    case 'POST':
-        if (authorize()) {
-            insert_skater($conn);
-        }
+    case preg_match('/^\/kof_api\/(\d+)?$/', $path, $matches):
+        $id = $matches[1] ?? null;
+        handle_skaters($method, $conn, $id);
         break;
-    case 'PUT':
-        if ($id !== null && authorize()) {
-            update_skater($conn, $id);
+    case preg_match('/^\/kof_api\/verify_token$/', $path):
+        if ($method === 'POST') {
+            if (authorize()) {
+                respond(200, "Token is valid.");
+            }
         } else {
-            respond(400, "ID is required for updating a skater.");
-        }
-        break;
-    case 'DELETE':
-        if ($id !== null && authorize()) {
-            delete_skater($conn, $id);
-        } else {
-            respond(400, "ID is required for deleting a skater.");
+            respond(405, "Method not allowed.");
         }
         break;
     default:
-        respond(405, "Method not allowed.");
+        respond(404, "Not Found.$path");
         break;
 }
 
+function login($conn)
+{
+    global $jwt_secret;
+    $data = json_decode(file_get_contents('php://input'), true);
+    $username = $data['username'] ?? null;
+    $password = $data['password'] ?? null;
+
+    if (!$username || !$password) {
+        respond(400, "Username and password are required.");
+        return;
+    }
+
+    $sql = "SELECT * FROM users WHERE username = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("s", $username);
+    $stmt->execute();
+    $result = $stmt->get_result();
+
+    if ($result && $result->num_rows > 0) {
+        $user = $result->fetch_assoc();
+        if (password_verify($password, $user['password'])) {
+            // Generate JWT
+            $payload = [
+                'id' => $user['id'],
+                'username' => $user['username'],
+                'exp' => time() + (60 * 60), // Expires in 1 hour
+            ];
+            $jwt = JWT::encode($payload, $jwt_secret, 'HS256');
+            respond(200, "Login successful.", ['token' => $jwt]);
+        } else {
+            respond(401, "Invalid password.");
+        }
+    } else {
+        respond(404, "User not found.");
+    }
+}
+
+
 function authorize()
 {
-    global $api_key;
+    global $jwt_secret;
     $headers = getallheaders();
-    $client_key = $headers['Authorization'] ?? null;
+    $auth_header = $headers['Authorization'] ?? null;
 
-    if ($client_key && $client_key === "Bearer $api_key") {
+    if (!$auth_header || !str_starts_with($auth_header, "Bearer ")) {
+        respond(401, "Unauthorized: Missing or invalid token.");
+        return false;
+    }
+
+    // Extraer el token del encabezado
+    $token = substr($auth_header, 7);
+    try {
+        // Decodificar el token
+        $decoded = JWT::decode($token, new Key($jwt_secret, 'HS256'));
+
+        // Verificar si el token ha expirado
+        if ($decoded->exp < time()) {
+            respond(401, "Unauthorized: Token expired.");
+            return false;
+        }
+
+        // El token es válido y no ha expirado, se puede acceder
         return true;
-    } else {
-        respond(401, "Unauthorized: Invalid or missing API key.");
+    } catch (Exception $e) {
+        respond(401, "Unauthorized: Invalid token.");
         return false;
     }
 }
+
+function handle_skaters($method, $conn, $id)
+{
+    if ($method !== 'GET' && !authorize()) {
+        return;
+    }
+
+    switch ($method) {
+        case 'GET':
+            if ($id === null) {
+                get_all_skaters($conn);
+            } else {
+                get_skater($conn, $id);
+            }
+            break;
+        case 'POST':
+            insert_skater($conn);
+            break;
+        case 'PUT':
+            if ($id !== null) {
+                update_skater($conn, $id);
+            } else {
+                respond(400, "ID is required for updating a skater.");
+            }
+            break;
+        case 'DELETE':
+            if ($id !== null) {
+                delete_skater($conn, $id);
+            } else {
+                respond(400, "ID is required for deleting a skater.");
+            }
+            break;
+        default:
+            respond(405, "Method not allowed.");
+            break;
+    }
+}
+
+
+
 
 function get_all_skaters($conn)
 {
